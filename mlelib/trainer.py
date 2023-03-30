@@ -58,29 +58,43 @@ class Trainer:
         os.makedirs(outdir, exist_ok=True)
         torch.save(self.best_dict, os.path.join(outdir, "best_model.pth"))
 
-    def get_embeddings(self, dataset, to_numpy=False):
+    def get_embeddings(self, dataset, model=None, return_labels=False, to_numpy=False):
         val_loader = DataLoader(dataset,
                                 num_workers=self.num_workers,
                                 batch_size=self.batch_size,
                                 shuffle=False)
         emb_list = []
-        self.model.eval()
-        for iter, (image_batch, label_batch) in val_loader:
+        if model is None:
+            model = self.model
+        
+        model.eval()
+        model.to(self.device)
+        label_list = []
+        for iter, (image_batch, label_batch) in enumerate(val_loader):
             image_batch = image_batch.to(self.device)
             label_batch = label_batch.to(self.device)
 
+            label_list.append(label_batch.cpu().numpy())
+
             with torch.no_grad():
-                embeddings = self.model(image_batch)
+                embeddings = model(image_batch)
 
             if to_numpy:
-                emb_list.append(embeddings)
-            else:
                 emb_list.append(embeddings.cpu().numpy())
+            else:
+                emb_list.append(embeddings)
         
         if to_numpy:
-            return np.vstack(emb_list)
+            emb = np.vstack(emb_list)
+            labels = np.concatenate(label_list)
         else:
-            return torch.stack(emb_list)
+            emb = torch.stack(emb_list)
+            labels = torch.concat(label_list)
+        
+        if return_labels:
+            return emb, labels
+        
+        return emb
 
 
     def fit(self, train_dataset, val_dataset=None, early_stopping_patience=5):
@@ -95,7 +109,7 @@ class Trainer:
                                     batch_size=self.batch_size,
                                     shuffle=False)
             eval = True
-            old_mean_loss = np.inf
+            best_mean_loss = np.inf
             early_stoping_counter = 0
         else:
             eval = False
@@ -103,7 +117,7 @@ class Trainer:
         for epoch in range(self.n_epochs):
             self.model.train()
             loss_list = []
-            for iter, (image_batch, label_batch) in train_loader:
+            for iter, (image_batch, label_batch) in enumerate(train_loader):
                 self.optim.zero_grad()
 
                 image_batch = image_batch.to(self.device)
@@ -122,7 +136,7 @@ class Trainer:
                 loss.backward()
                 self.optim.step()
             
-            mean_train_loss = np.mean(mean_train_loss)
+            mean_train_loss = np.mean(loss_list)
             print(f"epoch {epoch} Train Loss {mean_train_loss}")
 
             self.lr_sched.step()
@@ -130,7 +144,7 @@ class Trainer:
             if eval:
                 loss_list = []
                 self.model.eval()
-                for iter, (image_batch, label_batch) in val_loader:
+                for iter, (image_batch, label_batch) in enumerate(val_loader):
                     image_batch = image_batch.to(self.device)
                     label_batch = label_batch.to(self.device)
 
@@ -143,8 +157,8 @@ class Trainer:
                 mean_val_loss = np.mean(loss_list)
                 print(f"epoch {epoch} Val Loss {mean_val_loss}")
 
-                if mean_val_loss < old_mean_loss:
-                    early_stoping_counter = 0
+                if mean_val_loss < best_mean_loss:
+                    best_mean_loss = mean_val_loss
                     self.best_dict = {
                         "epoch": epoch,
                         "model": copy.deepcopy(self.model.state_dict()),
@@ -153,11 +167,14 @@ class Trainer:
                         "lr_sched": copy.deepcopy(self.lr_sched.state_dict())
                     }
                     self.save_model(self.output_dir)
+
+                    early_stoping_counter = 0
                 else:
                     early_stoping_counter += 1
                 
                 if early_stoping_counter == early_stopping_patience:
                     return
+                    
 
 
 
