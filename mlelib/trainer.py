@@ -4,13 +4,12 @@ import multiprocessing as mp
 import numpy as np
 import copy
 import os
+from tqdm import tqdm
 
 class Trainer:
     def __init__(self,
                  model,
-                 loss_func,
                  output_dir="outputs",
-                 miner_func=None,
                  optim="adam",
                  lr=1e-3,
                  weight_decay=0,
@@ -22,18 +21,16 @@ class Trainer:
                  ):
     
         self.model = model
-        self.loss_func = loss_func
         self.output_dir = output_dir
         self.batch_size = batch_size
         self.n_epochs = n_epochs
-        self.miner_func = miner_func
 
-        if num_workers:
+        if num_workers is not None:
             self.num_workers = num_workers
         else:
             self.num_workers = mp.cpu_count()
 
-        parameters =list(model.parameters()) + list(loss_func.parameters())
+        parameters =list(model.parameters())
 
         if optim == "adam":
             self.optim = torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
@@ -47,7 +44,6 @@ class Trainer:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.model.to(self.device)
-        self.loss_func.to(self.device)
     
     def save_model(self, output_dir=None):
         if output_dir:
@@ -70,14 +66,14 @@ class Trainer:
         model.eval()
         model.to(self.device)
         label_list = []
-        for iter, (image_batch, label_batch) in enumerate(val_loader):
+
+        for iter, (image_batch, label_batch) in enumerate(tqdm(val_loader)):
             image_batch = image_batch.to(self.device)
-            label_batch = label_batch.to(self.device)
 
             label_list.append(label_batch.cpu().numpy())
 
             with torch.no_grad():
-                embeddings = model(image_batch)
+                _, embeddings = model(image_batch, return_embeddings=True)
 
             if to_numpy:
                 emb_list.append(embeddings.cpu().numpy())
@@ -117,41 +113,40 @@ class Trainer:
         for epoch in range(self.n_epochs):
             self.model.train()
             loss_list = []
+            train_bar = tqdm(desc="Training", total=len(train_loader))
             for iter, (image_batch, label_batch) in enumerate(train_loader):
                 self.optim.zero_grad()
 
                 image_batch = image_batch.to(self.device)
                 label_batch = label_batch.to(self.device)
 
-                embeddings = self.model(image_batch)
-
-                if self.miner_func:
-                    miner_output = self.miner_func(embeddings, label_batch)
-                    loss = self.loss_func(embeddings, label_batch, miner_output)
-                else:
-                    loss = self.loss_func(embeddings, label_batch)
+                logits, loss = self.model(image_batch, labels=label_batch)
                 
-                loss_list.append(loss.item())
+                loss_value = loss.item()
+                loss_list.append(loss_value)
 
                 loss.backward()
                 self.optim.step()
+
+                if iter % 10 == 0: train_bar.set_postfix({'loss': loss_value})
+                train_bar.update()
             
+            train_bar.close()
             mean_train_loss = np.mean(loss_list)
-            print(f"epoch {epoch} Train Loss {mean_train_loss}")
+            print(f"epoch {epoch} Mean Train Loss {mean_train_loss}")
 
             self.lr_sched.step()
 
             if eval:
                 loss_list = []
                 self.model.eval()
-                for iter, (image_batch, label_batch) in enumerate(val_loader):
+                for iter, (image_batch, label_batch) in enumerate(tqdm(val_loader)):
                     image_batch = image_batch.to(self.device)
                     label_batch = label_batch.to(self.device)
 
                     with torch.no_grad():
-                        embeddings = self.model(image_batch)
+                        logits, loss = self.model(image_batch, labels=label_batch)
 
-                    loss = self.loss_func(embeddings, label_batch)
                     loss_list.append(loss.item())
                 
                 mean_val_loss = np.mean(loss_list)
@@ -162,7 +157,6 @@ class Trainer:
                     self.best_dict = {
                         "epoch": epoch,
                         "model": copy.deepcopy(self.model.state_dict()),
-                        "loss": copy.deepcopy(self.loss_func.state_dict()),
                         "optim": copy.deepcopy(self.optim.state_dict()),
                         "lr_sched": copy.deepcopy(self.lr_sched.state_dict())
                     }
